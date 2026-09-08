@@ -615,10 +615,60 @@ type searchResult struct {
 	matchedCommentContent string
 }
 
+// searchCommentCandidateCap bounds the number of distinct issue IDs the
+// comment trgm branch contributes to the candidate set per query.
+//
+// The comment bitmap heap scan for common tokens like "search" on
+// macaron-developer (4481 matching comments → 2441 distinct issues) takes
+// ~330 ms steady state — the bitmap is materialized before any LIMIT can
+// apply. With ORDER BY c.issue_id FETCH FIRST N ROWS ONLY the planner
+// picks an index scan over comment_issue_resolved_at_idx that stops after
+// N distinct issues, cutting the cost to ~25 ms for N=50 and ~95 ms for
+// N=200. The bitmap heap scan wins again around N≥263 on this workspace
+// (the planner's cutoff flips at 264), so 200 stays safely on the
+// index-scan side while leaving headroom for pagination + status filtering.
+//
+// Multi-word queries add one comment branch per term, each capped
+// independently — the UNION of branches still benefits because every
+// branch short-circuits.
+const searchCommentCandidateCap = 200
+
 // buildSearchQuery builds a dynamic SQL query for issue search.
-// It uses LOWER(column) LIKE for case-insensitive matching compatible with pg_bigm 1.2 GIN indexes.
-// Search patterns are lowercased in Go to avoid redundant LOWER() on the pattern side in SQL.
-// LIKE patterns are pre-built in Go (e.g. "%html%") so pg_bigm can extract bigrams from a single parameter value.
+//
+// The query is structured as a candidate-set filter plus a per-row re-check:
+//
+//	SELECT i.*, <rank columns>
+//	FROM issue i
+//	WHERE i.workspace_id = $ws
+//	  AND i.id IN (<candidate set>)
+//	  AND (<original OR-of-LIKE WHERE clause>)
+//	  [AND NOT (i.status = ANY($terminal))]
+//	ORDER BY <cancelled_rank>, <relevance_rank>, <status_rank>, i.updated_at DESC
+//	LIMIT $limit OFFSET $offset
+//
+// The candidate set is a UNION of per-field trgm bitmap scans:
+//
+//	(SELECT i.id FROM issue i WHERE workspace_id = $ws AND LOWER(i.title)    LIKE $phraseContains)
+//	UNION
+//	(SELECT i.id FROM issue i WHERE workspace_id = $ws AND LOWER(COALESCE(i.description,'')) LIKE $phraseContains)
+//	UNION
+//	(SELECT c.issue_id FROM comment c WHERE c.workspace_id = $ws AND LOWER(c.content) LIKE $phraseContains
+//	 ORDER BY c.issue_id FETCH FIRST 200 ROWS ONLY)
+//	-- plus one (title,desc,comment) triple per term for multi-word queries
+//	-- plus (SELECT i.id FROM issue i WHERE i.number = $num) when hasNum
+//
+// Each branch uses its own GIN bitmap scan (idx_issue_title_trgm,
+// idx_issue_description_trgm, idx_comment_content_trgm). The original
+// OR-of-LIKE WHERE clause is kept as a per-row re-check on the small
+// candidate set — it is needed for multi-word AND semantics (a row in
+// candidates because title matches "foo" still has to also match "bar"
+// somewhere) and is cheap over the bounded candidate set.
+//
+// On macaron-developer (15165 issues, 43703 comments, 170 MB trgm index)
+// this drops p99 from ~3.4 s (workspace index scan + per-row filter) to
+// ~110 ms (three bitmap scans + 200-row comment short-circuit). See
+// MUL-4059 for the EXPLAIN history; the MUL-7055 candidate-first refactor
+// regressed this by skipping the trgm indexes, this restores them.
 func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, includeClosed bool, terminalStatusKeys []string) (string, []any) {
 	// Lowercase in Go so SQL only needs LOWER() on the column side.
 	phrase = strings.ToLower(phrase)
@@ -646,7 +696,7 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 
 	wsParam := nextArg(nil) // $4 — workspace_id, will be filled by caller position
 
-	// Build per-term LIKE conditions only for multi-word search.
+	// Build per-term LIKE parameters only for multi-word search.
 	var termContainsParams []string
 	if len(terms) > 1 {
 		for _, t := range terms {
@@ -655,7 +705,72 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		}
 	}
 
-	// --- WHERE clause ---
+	// --- Candidate set (UNION of per-field trgm bitmap scans) ---
+	//
+	// Every branch filters by workspace_id so the planner picks the trgm
+	// bitmap scan (or the comment_issue_resolved_at_idx index scan for
+	// the FETCH-capped comment branch) instead of falling through to a
+	// workspace index scan + per-row filter over every issue in the
+	// workspace.
+	candidateBranches := []string{
+		fmt.Sprintf(
+			"SELECT i.id FROM issue i WHERE i.workspace_id = %s AND LOWER(i.title) LIKE %s",
+			wsParam, phraseContainsParam,
+		),
+		fmt.Sprintf(
+			"SELECT i.id FROM issue i WHERE i.workspace_id = %s AND LOWER(COALESCE(i.description, '')) LIKE %s",
+			wsParam, phraseContainsParam,
+		),
+		fmt.Sprintf(
+			"SELECT c.issue_id FROM comment c WHERE c.workspace_id = %s AND LOWER(c.content) LIKE %s ORDER BY c.issue_id FETCH FIRST %d ROWS ONLY",
+			wsParam, phraseContainsParam, searchCommentCandidateCap,
+		),
+	}
+
+	// Multi-word: add one (title, desc, comment) triple per term so the
+	// candidate set covers rows where individual terms match (the outer
+	// WHERE re-checks the AND semantics). Each comment branch is capped
+	// independently by FETCH FIRST N.
+	for _, tp := range termContainsParams {
+		candidateBranches = append(candidateBranches,
+			fmt.Sprintf(
+				"SELECT i.id FROM issue i WHERE i.workspace_id = %s AND LOWER(i.title) LIKE %s",
+				wsParam, tp,
+			),
+			fmt.Sprintf(
+				"SELECT i.id FROM issue i WHERE i.workspace_id = %s AND LOWER(COALESCE(i.description, '')) LIKE %s",
+				wsParam, tp,
+			),
+			fmt.Sprintf(
+				"SELECT c.issue_id FROM comment c WHERE c.workspace_id = %s AND LOWER(c.content) LIKE %s ORDER BY c.issue_id FETCH FIRST %d ROWS ONLY",
+				wsParam, tp, searchCommentCandidateCap,
+			),
+		)
+	}
+
+	// Number match (identifier lookup like "MUL-42"): a row with the
+	// matching number is a candidate even if the phrase doesn't match
+	// title/desc/comment.
+	numParam := ""
+	if hasNum {
+		numParam = nextArg(queryNum)
+		candidateBranches = append(candidateBranches,
+			fmt.Sprintf(
+				"SELECT i.id FROM issue i WHERE i.workspace_id = %s AND i.number = %s",
+				wsParam, numParam,
+			),
+		)
+	}
+
+	candidateSubquery := "(" + strings.Join(candidateBranches, " UNION ") + ") AS u(id)"
+
+	// --- Per-row re-check (the original OR-of-LIKE WHERE clause) ---
+	//
+	// The candidate set is a superset of the true match set for multi-word
+	// queries (a row in candidates because title matches "foo" still
+	// needs "bar" to match somewhere). Re-apply the original WHERE on the
+	// small candidate set — cheap because the candidate set is bounded by
+	// the comment FETCH cap and the workspace-filtered trgm bitmap scans.
 	var whereParts []string
 
 	// Full phrase match: title, description, or comment.
@@ -692,9 +807,7 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 	}
 
 	// Number match
-	numParam := ""
 	if hasNum {
-		numParam = nextArg(queryNum)
 		whereParts = append(whereParts, fmt.Sprintf("i.number = %s", numParam))
 	}
 
@@ -863,12 +976,13 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		%s AS match_source,
 		%s AS matched_comment_content
 	FROM issue i
-	WHERE i.workspace_id = %s AND %s
+	WHERE i.workspace_id = %s AND i.id IN (%s) AND %s
 	ORDER BY %s, %s, %s, i.updated_at DESC
 	LIMIT %s OFFSET %s`,
 		matchSourceExpr,
 		commentSubquery,
 		wsParam,
+		candidateSubquery,
 		whereClause,
 		cancelledRank,
 		rankExpr,
