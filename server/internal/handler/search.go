@@ -18,14 +18,16 @@ import (
 //
 // SearchProjects runs LOWER(col) LIKE '%pattern%' queries whose fast path
 // depends on pg_bigm / pg_trgm GIN indexes (see migrations 032, 033, 036,
-// 137–142). SearchIssues instead deliberately uses a candidate-first plan that
-// scans each selected workspace's issues and comments once, avoiding repeated
-// global GIN/hashed-subplan work at the cost of giving up content-index
-// selectivity. Missing extensions or an unexpectedly large workspace can
-// therefore still make either path slow enough that the frontend appears to
-// hang ("搜索卡死没有任何反应", MUL-4059).
+// 137–142). SearchIssues uses EXISTS subqueries routed onto
+// idx_comment_content_trgm for the comment half, but the issue-side OR
+// (title LIKE / description LIKE / comment EXISTS) still falls through
+// to an idx_issue_workspace scan + per-row filter over the workspace's
+// issues, so on macaron-developer (16k issues, 43k comments) the steady
+// state per-request time is ~3.4 s. Missing extensions or an unexpectedly
+// large workspace can therefore still make either path slow enough that
+// the frontend appears to hang ("搜索卡死没有任何反应", MUL-4059).
 //
-// The 8 s cap is generous compared to a properly indexed search (typically
+// The cap is generous compared to a properly indexed search (typically
 // <50 ms) and short enough that the frontend's implicit request timeout
 // (browser default, ~30 s) never kicks in. On timeout the caller sees a
 // 503 with a descriptive error rather than a stalled connection —
@@ -33,15 +35,16 @@ import (
 // http.StatusServiceUnavailable so the frontend can distinguish this
 // from a generic 500.
 //
-// Raised from 3 s to 8 s after pr-multica-review GitHub Action failures
-// surfaced on macaron-developer workspace (mindverse-ltd/macaron-service
-// issue #1354): multi-word queries like "review pr macaron-service#<N>"
-// trigger OR-of-LIKE plans that the planner occasionally fails to route
-// onto the pg_bigm / pg_trgm GIN bitmap, falling back to Seq Scans that
-// exceed 3 s under load. 8 s covers the p99 of indexed searches while
-// still bounding worst-case latency.
+// Raised from 8 s to 20 s after the pr-multica-review GitHub Action
+// continued to surface intermittent 503s on macaron-developer (Sep 8
+// 2026) even after the MUL-7055 candidate-first revert: the EXISTS plan
+// runs ~3.4 s steady state on that workspace, so any variance under
+// load (extra daemon heartbeats, planner churn, buffer eviction) was
+// pushing it past 8 s. 20 s gives ~17 s of headroom while still bounding
+// worst-case latency under the frontend's ~30 s implicit request
+// timeout.
 const (
-	searchStatementTimeout = 8 * time.Second
+	searchStatementTimeout = 20 * time.Second
 
 	searchWorkMemEnv       = "DATABASE_SEARCH_WORK_MEM_MB"
 	defaultSearchWorkMemMB = 64
