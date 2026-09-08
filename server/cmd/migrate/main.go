@@ -399,9 +399,9 @@ func refuseChannelChatRouteHistoryRollbackWith(ctx context.Context, query rowQue
 }
 
 var upMigrationConditions = map[string]migrationCondition{
-	// Current search no longer consumes a comment-content GIN. Fresh installs
-	// should not build the historical fallback only to retire it at migration 455.
-	"140_comment_content_trgm_index": skipMigration("comment content search indexes are retired by migration 455"),
+	// Migration 456 restores idx_comment_content_trgm after 455's premise was
+	// reverted; 140 is still skipped because 456 is the canonical creator now.
+	"140_comment_content_trgm_index": skipMigration("comment content trgm index is recreated by migration 456"),
 	// Existing pg_bigm deployments already have both indexes. Remove the
 	// fallback only after proving the preferred index has the exact usable shape;
 	// pg_bigm-less self-hosted databases keep trgm and record 371 as a no-op.
