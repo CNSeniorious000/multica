@@ -17,22 +17,22 @@ func TestBuildSearchQuery_SingleTerm(t *testing.T) {
 	if strings.Contains(query, "ILIKE") {
 		t.Error("query should not contain ILIKE")
 	}
-	if !strings.Contains(query, "LOWER(i.title) LIKE") {
-		t.Error("query should contain LOWER(i.title) LIKE")
+	if !strings.Contains(query, "lowered_issue_title.lowered LIKE") {
+		t.Error("query should match against the pre-lowered issue title")
 	}
-	if !strings.Contains(query, "LOWER(COALESCE(i.description, '')) LIKE") {
-		t.Error("query should contain LOWER(COALESCE(i.description, '')) LIKE")
+	if !strings.Contains(query, "lowered_issue_description.lowered LIKE") {
+		t.Error("query should match against the conditionally lowered issue description")
 	}
 	if !strings.Contains(query, "LOWER(c.content) LIKE") {
 		t.Error("query should contain LOWER(c.content) LIKE")
 	}
 
 	// Exact title rank should not double-LOWER the pattern.
-	if strings.Contains(query, "LOWER(i.title) = LOWER(") {
+	if strings.Contains(query, "lowered_issue_title.lowered = LOWER(") {
 		t.Error("exact title rank should not wrap pattern in LOWER (already lowercased in Go)")
 	}
-	if !strings.Contains(query, "LOWER(i.title) = $1") {
-		t.Error("exact title rank should compare LOWER(i.title) = $1 directly")
+	if !strings.Contains(query, "lowered_issue_title.lowered = $1") {
+		t.Error("exact title rank should compare the lowered title to $1 directly")
 	}
 
 	// Should exclude closed issues by default.
