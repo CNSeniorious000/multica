@@ -712,6 +712,16 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 	// the FETCH-capped comment branch) instead of falling through to a
 	// workspace index scan + per-row filter over every issue in the
 	// workspace.
+	// commentCandidateBranch builds a FETCH-capped comment candidate branch.
+	// Parentheses are required: without them ORDER BY / FETCH FIRST bind to
+	// the whole UNION rather than this one branch.
+	commentCandidateBranch := func(likeParam string) string {
+		return fmt.Sprintf(
+			"(SELECT c.issue_id FROM comment c WHERE c.workspace_id = %s AND LOWER(c.content) LIKE %s ORDER BY c.issue_id FETCH FIRST %d ROWS ONLY)",
+			wsParam, likeParam, searchCommentCandidateCap,
+		)
+	}
+
 	candidateBranches := []string{
 		fmt.Sprintf(
 			"SELECT i.id FROM issue i WHERE i.workspace_id = %s AND LOWER(i.title) LIKE %s",
@@ -721,10 +731,7 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 			"SELECT i.id FROM issue i WHERE i.workspace_id = %s AND LOWER(COALESCE(i.description, '')) LIKE %s",
 			wsParam, phraseContainsParam,
 		),
-		fmt.Sprintf(
-			"SELECT c.issue_id FROM comment c WHERE c.workspace_id = %s AND LOWER(c.content) LIKE %s ORDER BY c.issue_id FETCH FIRST %d ROWS ONLY",
-			wsParam, phraseContainsParam, searchCommentCandidateCap,
-		),
+		commentCandidateBranch(phraseContainsParam),
 	}
 
 	// Multi-word: add one (title, desc, comment) triple per term so the
@@ -741,10 +748,7 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 				"SELECT i.id FROM issue i WHERE i.workspace_id = %s AND LOWER(COALESCE(i.description, '')) LIKE %s",
 				wsParam, tp,
 			),
-			fmt.Sprintf(
-				"SELECT c.issue_id FROM comment c WHERE c.workspace_id = %s AND LOWER(c.content) LIKE %s ORDER BY c.issue_id FETCH FIRST %d ROWS ONLY",
-				wsParam, tp, searchCommentCandidateCap,
-			),
+			commentCandidateBranch(tp),
 		)
 	}
 
@@ -762,7 +766,8 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 		)
 	}
 
-	candidateSubquery := "(" + strings.Join(candidateBranches, " UNION ") + ") AS u(id)"
+	// IN (...) takes a subquery directly; no alias is allowed here.
+	candidateSubquery := strings.Join(candidateBranches, " UNION ")
 
 	// --- Per-row re-check (the original OR-of-LIKE WHERE clause) ---
 	//
