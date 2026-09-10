@@ -399,9 +399,9 @@ func refuseChannelChatRouteHistoryRollbackWith(ctx context.Context, query rowQue
 }
 
 var upMigrationConditions = map[string]migrationCondition{
-	// Migration 456 restores idx_comment_content_trgm after 455's premise was
-	// reverted; 140 is still skipped because 456 is the canonical creator now.
-	"140_comment_content_trgm_index": skipMigration("comment content trgm index is recreated by migration 456"),
+	// Migration 457 restores idx_comment_content_trgm after 455's premise was
+	// reverted; 140 is still skipped because 457 is the canonical creator now.
+	"140_comment_content_trgm_index": skipMigration("comment content trgm index is recreated by migration 457"),
 	// Existing pg_bigm deployments already have both indexes. Remove the
 	// fallback only after proving the preferred index has the exact usable shape;
 	// pg_bigm-less self-hosted databases keep trgm and record 371 as a no-op.
