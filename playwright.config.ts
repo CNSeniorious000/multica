@@ -9,6 +9,11 @@ export default defineConfig({
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? process.env.FRONTEND_ORIGIN ?? "http://localhost:3000",
     headless: true,
+    // Opt-in video recording (PLAYWRIGHT_VIDEO=1) for the streaming demo, so a
+    // normal run stays fast and artifact-free.
+    ...(process.env.PLAYWRIGHT_VIDEO === "1"
+      ? { video: { mode: "on" as const, size: { width: 1440, height: 1400 } } }
+      : {}),
   },
   projects: [
     {
