@@ -541,4 +541,27 @@ describe("ui4a/tsx dispatch (MAC-19026)", () => {
     });
     expect(container.querySelector("code.hljs")).toBeNull();
   });
+
+  it("shows an OPEN ui4a/tsx fence as highlighted TSX source in a capped shell", async () => {
+    // Closing fence not yet streamed: the block must stay source (no upgrade),
+    // and while it streams it should read as TSX — not the plaintext an
+    // unregistered `ui4a/tsx` grammar would fall back to — inside the capped,
+    // scrollable streaming-source shell.
+    const OPEN = "```ui4a/tsx\nexport default () => <div>hi</div>;\n";
+    const { container } = render(<ReadonlyContent content={OPEN} />);
+    await waitFor(() => {
+      expect(container.querySelector("code")).not.toBeNull();
+    });
+    // Not upgraded: no ui4a leaf while the fence is open.
+    expect(container.querySelector("[data-testid='ui4a-block']")).toBeNull();
+    // Highlighted as TSX (lowlight maps the token to `tsx`), not plaintext:
+    // the `export` keyword becomes its own hljs span.
+    const code = container.querySelector("code.hljs.language-tsx");
+    expect(code).not.toBeNull();
+    expect(container.querySelector(".hljs-keyword")).not.toBeNull();
+    // Streaming-source shell carries the cap marker.
+    expect(
+      container.querySelector(".code-block-wrapper[data-streaming-source]"),
+    ).not.toBeNull();
+  });
 });

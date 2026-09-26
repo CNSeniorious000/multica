@@ -35,3 +35,14 @@
   margin-top: 0.5rem;
   margin-bottom: 0.5rem;
 }
+
+/* Streaming source of a rich fence (a mermaid/html/ui4a block whose closing
+   fence has not arrived) is shown as plain code that grows line by line. Its
+   full body can be hundreds of lines, so cap it and let it scroll instead of
+   pushing the rest of the message far down the viewport while it types. Once
+   the fence closes the block upgrades (or, for a settled plain fence, keeps its
+   natural height) — this only applies while the marker is present. */
+.code-block-wrapper[data-streaming-source] pre {
+  max-height: 22rem;
+  overflow-y: auto;
+}

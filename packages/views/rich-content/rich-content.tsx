@@ -402,10 +402,17 @@ function RichPre({ children }: RichPreProps) {
     return <>{children}</>;
   }
 
+  // A rich-fence language whose fence has not closed yet is the streaming
+  // SOURCE of a block that will upgrade (its full body can be hundreds of
+  // lines), so the shell caps and scrolls it rather than letting it push the
+  // whole message down while it types out.
+  const streamingSource = isRichFenceLanguage(language) && !isFenceClosed;
+
   return (
     <CodeBlockShell
       language={language}
       code={getTextContent(children).replace(/\n$/, "")}
+      streamingSource={streamingSource}
     >
       {children}
     </CodeBlockShell>

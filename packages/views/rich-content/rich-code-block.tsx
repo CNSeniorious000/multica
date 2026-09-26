@@ -78,6 +78,18 @@ const MemoHtmlBlockPreview = memo(HtmlBlockPreview);
  * Static lowlight-highlighted `<code>`, matching the editable Tiptap code
  * block's engine and `.hljs-*` CSS so a fence looks identical in every surface.
  */
+/**
+ * The grammar lowlight should highlight a fence with. A rich-fence language
+ * token is not itself a lowlight grammar — `ui4a/tsx` in particular is a
+ * slashed token that no grammar is registered under, so it would fall back to
+ * plaintext. Its body IS TSX, so while the fence streams open (and renders as
+ * source, not a compiled widget) it should read as highlighted TSX. Plain
+ * languages pass through unchanged.
+ */
+function highlightGrammar(language: string | undefined): string | undefined {
+  return language === "ui4a/tsx" ? "tsx" : language;
+}
+
 export function StaticCodeBody({
   language,
   body,
@@ -87,15 +99,16 @@ export function StaticCodeBody({
   body: string;
   className?: string;
 }) {
+  const grammar = highlightGrammar(language);
   const html = useMemo(() => {
     const code = body.replace(/\n$/, "");
     try {
-      const tree = highlightCode(code, language);
+      const tree = highlightCode(code, grammar);
       return toHtml(tree);
     } catch {
       return null;
     }
-  }, [body, language]);
+  }, [body, grammar]);
 
   if (html == null) {
     // Highlighter failure must not blank the code — render it unhighlighted.
@@ -106,7 +119,7 @@ export function StaticCodeBody({
 
   return (
     <code
-      className={cn("hljs", language && `language-${language}`, className)}
+      className={cn("hljs", grammar && `language-${grammar}`, className)}
       dangerouslySetInnerHTML={{ __html: html }}
     />
   );
@@ -120,10 +133,18 @@ export function CodeBlockShell({
   language,
   code,
   children,
+  /**
+   * True while this shell shows the SOURCE of a rich fence that is still
+   * streaming open (a mermaid/html/ui4a fence whose closer has not arrived).
+   * Such a block can grow to hundreds of lines mid-stream, so it gets a capped,
+   * scrollable body; a settled ordinary code block keeps its natural height.
+   */
+  streamingSource = false,
 }: {
   language?: string;
   code: string;
   children: ReactNode;
+  streamingSource?: boolean;
 }) {
   const { t } = useT("editor");
   const [copied, setCopied] = useState(false);
@@ -138,7 +159,10 @@ export function CodeBlockShell({
   };
 
   return (
-    <div className="code-block-wrapper group/code relative my-3">
+    <div
+      className="code-block-wrapper group/code relative my-3"
+      data-streaming-source={streamingSource ? "" : undefined}
+    >
       <div className="absolute top-0 right-0 z-10 flex items-center gap-1.5 px-2 py-1.5 opacity-0 transition-opacity group-hover/code:opacity-100 focus-within:opacity-100">
         {language && (
           <span className="text-caption text-muted-foreground select-none">
