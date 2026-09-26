@@ -39,17 +39,21 @@ import {
 } from "../editor/html-block-preview";
 import { highlightCode } from "../editor/syntax-highlight";
 import { LazyRichBlock } from "./lazy-rich-block";
+import { Ui4aFenceBlock } from "./ui4a-block";
 
 /**
  * Languages that may become a rich block. Anything else — including unknown
  * and absent languages — renders as static highlighted code.
+ *
+ * `ui4a/tsx` carries a slash, so the surface regex that reads the language
+ * token off `language-…` must keep the whole token (see rich-content.tsx).
  */
-export type RichFenceLanguage = "mermaid" | "html";
+export type RichFenceLanguage = "mermaid" | "html" | "ui4a/tsx";
 
 export function isRichFenceLanguage(
   language: string | undefined,
 ): language is RichFenceLanguage {
-  return language === "mermaid" || language === "html";
+  return language === "mermaid" || language === "html" || language === "ui4a/tsx";
 }
 
 /**
@@ -179,9 +183,10 @@ export function RichFenceBlock({
   language: RichFenceLanguage;
   body: string;
 }) {
-  // Split into two components so the Mermaid-only height hook is never called
-  // conditionally.
+  // Split into separate components so the Mermaid-only height hook is never
+  // called conditionally.
   if (language === "mermaid") return <MermaidFenceBlock chart={body} />;
+  if (language === "ui4a/tsx") return <Ui4aFenceBlock code={body} />;
   return <HtmlFenceBlock html={body} />;
 }
 

@@ -86,6 +86,16 @@ vi.mock("mermaid", () => ({
   },
 }));
 
+// The ui4a/tsx leaf compiles TSX through a browser WASM runtime + network,
+// which jsdom cannot host. Its own wiring is covered in ui4a-block.test.tsx; here
+// we only assert that a ```ui4a/tsx fence is DISPATCHED to it on every surface,
+// so a lightweight stand-in that marks itself is enough.
+vi.mock("./ui4a-block", () => ({
+  Ui4aFenceBlock: ({ code }: { code: string }) => (
+    <div data-testid="ui4a-block">{code}</div>
+  ),
+}));
+
 // react-virtuoso does not virtualize under jsdom's zero-height viewport, so
 // render every row directly. computeItemKey is still exercised: it is what
 // gives the live row and the persisted row one identity.
@@ -499,5 +509,36 @@ describe("semantic parity beyond Mermaid", () => {
       expect(container.querySelectorAll("code.hljs").length).toBe(2);
     }
     expect(mermaidRenderMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("ui4a/tsx dispatch (MAC-19026)", () => {
+  const UI4A_FIXTURE = '```ui4a/tsx\nexport default () => <div>hi</div>;\n```';
+
+  it("dispatches a ui4a/tsx fence to Ui4aFenceBlock on Issue/Comment", async () => {
+    const { container } = render(<ReadonlyContent content={UI4A_FIXTURE} />);
+    await waitFor(() => {
+      expect(container.querySelector("[data-testid='ui4a-block']")).not.toBeNull();
+    });
+    // Not a static code block: the fence was upgraded.
+    expect(container.querySelector("code.hljs")).toBeNull();
+  });
+
+  it("dispatches a ui4a/tsx fence to Ui4aFenceBlock in Chat", async () => {
+    const client = makeClient();
+    const { container } = render(
+      withClient(
+        <ChatMessageList
+          messages={[userMessage(UI4A_FIXTURE)] as never}
+          pendingTask={null}
+          availability={undefined}
+        />,
+        client,
+      ),
+    );
+    await waitFor(() => {
+      expect(container.querySelector("[data-testid='ui4a-block']")).not.toBeNull();
+    });
+    expect(container.querySelector("code.hljs")).toBeNull();
   });
 });

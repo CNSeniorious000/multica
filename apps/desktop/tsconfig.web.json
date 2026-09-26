@@ -15,7 +15,11 @@
     "paths": {
       "@/*": [
         "src/renderer/src/*"
-      ]
+      ],
+      "partial-tsx": ["../../packages/views/rich-content/partial-tsx.d.ts"],
+      "partial-react": ["../../packages/views/rich-content/partial-react.d.ts"],
+      "partial-react/import-map": ["../../packages/views/rich-content/partial-react-import-map.d.ts"],
+      "partial-react/remote-module": ["../../packages/views/rich-content/partial-react-remote-module.d.ts"]
     }
   }
 }

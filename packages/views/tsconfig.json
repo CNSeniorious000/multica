@@ -2,7 +2,19 @@
   "extends": "@multica/tsconfig/react-library.json",
   "compilerOptions": {
     "outDir": "dist",
-    "rootDir": "."
+    "rootDir": ".",
+    "paths": {
+      // partial-react and partial-tsx ship raw .ts with no .d.ts, so tsc would
+      // descend into their implementation and fail this repo's stricter flags
+      // (noUncheckedIndexedAccess). The ui4a/tsx renderer is their only
+      // consumer; redirect the subpaths it imports to local stubs mirroring the
+      // packages' public exports. Type-checking only — the bundler still
+      // resolves the real modules via each package's `exports` field.
+      "partial-tsx": ["./rich-content/partial-tsx.d.ts"],
+      "partial-react": ["./rich-content/partial-react.d.ts"],
+      "partial-react/import-map": ["./rich-content/partial-react-import-map.d.ts"],
+      "partial-react/remote-module": ["./rich-content/partial-react-remote-module.d.ts"]
+    }
   },
   "include": ["**/*.ts", "**/*.tsx", "**/*.d.mts"],
   "exclude": ["node_modules", "dist"]

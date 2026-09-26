@@ -341,7 +341,10 @@ function isMultiLineNode(node: ExtraProps["node"]): boolean {
  * diagram or preview iframe.
  */
 function RichCode({ className, children, node, ...props }: RichCodeProps) {
-  const language = /language-(\w+)/.exec(className || "")?.[1];
+  // `[\w/]` (not `\w`) keeps a slashed language token whole, e.g. `ui4a/tsx`.
+  // The run still stops at whitespace, so `language-htmlbars` reads as the whole
+  // `htmlbars`, never `html` — no substring dispatch is introduced.
+  const language = /language-([\w/]+)/.exec(className || "")?.[1];
   const isBlock = isMultiLineNode(node);
   const isFenceClosed = useIsFenceClosed(nodeStartOffset(node));
 
@@ -374,7 +377,9 @@ function readFencedCodeChild(children: ReactNode): {
   if (!isValidElement<{ className?: string } & ExtraProps>(child)) return {};
   return {
     // Whole class token only: `language-htmlbars` must not read as `html`.
-    language: /(?:^|\s)language-(\w+)(?:\s|$)/.exec(child.props.className ?? "")?.[1],
+    // `[\w/]` keeps a slashed token whole (`ui4a/tsx`) while the `(?:\s|$)`
+    // boundary still anchors on the full class, so `htmlbars` stays `htmlbars`.
+    language: /(?:^|\s)language-([\w/]+)(?:\s|$)/.exec(child.props.className ?? "")?.[1],
     offset: nodeStartOffset(child.props.node),
   };
 }
