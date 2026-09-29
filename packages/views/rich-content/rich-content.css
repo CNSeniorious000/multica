@@ -43,6 +43,6 @@
    the fence closes the block upgrades (or, for a settled plain fence, keeps its
    natural height) — this only applies while the marker is present. */
 .code-block-wrapper[data-streaming-source] pre {
-  max-height: 22rem;
+  max-height: 14rem;
   overflow-y: auto;
 }
