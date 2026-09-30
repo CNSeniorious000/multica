@@ -1,0 +1,52 @@
+diff --git a/src/partial.ts b/src/partial.ts
+index 0496847..eb6e65f 100644
+--- a/src/partial.ts
++++ b/src/partial.ts
+@@ -1305,6 +1305,38 @@ const isComponentArrowPrefix = (code: string, end: number) => {
+ };
+ const isComponentArrowFrame = (code: string, frame: Extract<CompletionFrame, { type: "block" }>) => COMPONENT_ARROW_HEADER.test(getFrameHeader(code, frame));
+ 
++// Mount effects run once the component commits, before its returned JSX would have attached any ref. A component whose body
++// has fully streamed such an effect but no render return yet (`useEffect(() => echarts.init(ref.current), [])` with the
++// `return <div ref={ref}/>` still pending) becomes, once its `{` is closed with `}`, a renderable component that mounts,
++// fires the effect against `ref.current === null`, and throws on the client. The SSR `renderToString` preflight cannot see
++// this — effects never run server-side — so the crash only lands on mount. Roll the frame back until its render return
++// streams in; the runtime then keeps its last good frame instead of mounting the unrenderable one. Hooks whose callbacks
++// contain a `return` (the effect cleanup `return () => …`) sit at depth > 0 and never count as the component's own return.
++const MOUNT_EFFECT_HOOKS = new Set(["useEffect", "useLayoutEffect", "useInsertionEffect"]);
++const isUnrenderableEffectComponentFrame = (code: string, frame: Extract<CompletionFrame, { type: "block" }>) => {
++  if (frame.open === undefined || !isComponentFunctionFrame(code, frame)) return false;
++  const body = maskIgnoredTextForExportScan(code.slice(frame.open + 1));
++  let depth = 0;
++  let runsMountEffect = false;
++  for (let index = 0; index < body.length; index += 1) {
++    const char = body[index];
++    if (char === "{" || char === "(" || char === "[") depth += 1;
++    else if (char === "}" || char === ")" || char === "]") depth = Math.max(0, depth - 1);
++    else if (depth === 0 && /[A-Za-z_$]/.test(char)) {
++      const word = /^[A-Za-z_$][\w$]*/.exec(body.slice(index))?.[0] ?? "";
++      // A render return (`return <jsx>`/`return (`/`return [`/`return createElement`) means the component produces UI and any
++      // ref it hands to an effect can attach — the frame is safe. `return null`/`return;` render nothing, so a ref-touching
++      // effect would still fire against a null ref; those are not treated as a safe render return.
++      // A bare trailing `return <` (an incomplete JSX tag with no name yet) is trimmed by the incomplete-tag rollback below,
++      // re-exposing the effect — so it is not a surviving render return. Require the `<` to have opened a real tag (name/`>`/`/`).
++      if (word === "return" && /^\s*(?:<[A-Za-z>/]|\(|\[|React\.createElement|createElement)/.test(body.slice(index + word.length))) return false;
++      if (MOUNT_EFFECT_HOOKS.has(word)) runsMountEffect = true;
++      index += word.length - 1;
++    }
++  }
++  return runsMountEffect;
++};
++
+ const isCompleteJsxTail = (code: string, scan: StreamingScan) => {
+   const trimmed = code.trimEnd();
+   if (!/(?:\/>|<\/[A-Za-z][\w$.-]*>)\s*;?\s*$/.test(trimmed)) return false;
+@@ -1620,7 +1652,7 @@ const trimToCommittedPrefix = (code: string) => {
+   for (const frame of scan.stack) {
+     if (frame.type !== "block" || frame.jsxExpression) continue;
+     if (safeJsxShell && isAllowedJsxShellFrame(code, frame, componentArrow)) continue;
+-    if (frame.kind === "function" && isFunctionDeclarationFrame(code, frame)) continue;
++    if (frame.kind === "function" && isFunctionDeclarationFrame(code, frame) && !isUnrenderableEffectComponentFrame(code, frame)) continue;
+     cut = Math.min(cut, frame.statementStart ?? frame.open ?? code.length);
+   }
+   cut = Math.min(cut, findPendingContinuationStart(code, scan));

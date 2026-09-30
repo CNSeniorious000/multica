@@ -125,6 +125,11 @@ overrides:
   minimatch@10>brace-expansion: 5.0.9
   builder-util-runtime: 9.7.0
 
+patchedDependencies:
+  partial-tsx@0.0.5:
+    hash: b22bddee0c52f35e97362c96c3b1dbaed84d5a4fd2b3fa7a3f67e1294ced4fd7
+    path: patches/partial-tsx@0.0.5.patch
+
 importers:
 
   .:
@@ -964,7 +969,7 @@ importers:
         version: 0.0.8(react-dom@19.2.3(react@19.2.3))(react@19.2.3)
       partial-tsx:
         specifier: ^0.0.5
-        version: 0.0.5
+        version: 0.0.5(patch_hash=b22bddee0c52f35e97362c96c3b1dbaed84d5a4fd2b3fa7a3f67e1294ced4fd7)
       pinyin-pro:
         specifier: 3.26.0
         version: 3.26.0
@@ -20467,11 +20472,11 @@ snapshots:
   partial-react@0.0.8(react-dom@19.2.3(react@19.2.3))(react@19.2.3):
     dependencies:
       '@esm.sh/tsx': 1.5.3
-      partial-tsx: 0.0.5
+      partial-tsx: 0.0.5(patch_hash=b22bddee0c52f35e97362c96c3b1dbaed84d5a4fd2b3fa7a3f67e1294ced4fd7)
       react: 19.2.3
       react-dom: 19.2.3(react@19.2.3)
 
-  partial-tsx@0.0.5: {}
+  partial-tsx@0.0.5(patch_hash=b22bddee0c52f35e97362c96c3b1dbaed84d5a4fd2b3fa7a3f67e1294ced4fd7): {}
 
   path-browserify@1.0.1: {}
 

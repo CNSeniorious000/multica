@@ -38,6 +38,9 @@
       "esbuild",
       "electron"
     ],
+    "patchedDependencies": {
+      "partial-tsx@0.0.5": "patches/partial-tsx@0.0.5.patch"
+    },
     "overrides": {
       "@types/react": "catalog:",
       "@types/react-dom": "catalog:",
