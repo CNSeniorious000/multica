@@ -39,6 +39,7 @@ export class GenUIRenderer {
   pushCode(code: string, serial?: number): void;
   finish(code?: string, serial?: number): void;
   getCurrentBuffer(): string;
+  setImportMap(importmap: RendererImportMap): this;
   clear(options?: GenUIRendererClearOptions): this;
   detach(): this;
 }

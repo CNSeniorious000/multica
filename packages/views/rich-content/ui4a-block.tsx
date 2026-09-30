@@ -131,6 +131,7 @@ type RemoteModule = typeof import("partial-react/remote-module");
 type Ui4aRuntime = {
   createRenderer: GenUIRendererModule["GenUIRenderer"]["create"];
   buildImportMap: (code: string) => Promise<RendererImportMap>;
+  importMapKey: (code: string) => string;
 };
 
 let runtimePromise: Promise<Ui4aRuntime> | null = null;
@@ -173,6 +174,17 @@ async function loadRuntime(): Promise<Ui4aRuntime> {
     return {
       createRenderer: (runtime as GenUIRendererModule).GenUIRenderer.create,
       buildImportMap: (code: string) => resolver.resolve({ code }),
+      // The resolver's output depends on which bare specifiers have appeared
+      // and whether each one is imported or used through import.meta.resolve.
+      // JSX/body tokens do not change it. This key lets each streaming block
+      // share an in-flight map resolve instead of restarting a remote module
+      // fetch at every token (which would starve partial rendering).
+      importMapKey: (code: string) =>
+        JSON.stringify([
+          [...(importMap as ImportMapModule).extractBareModuleSpecifiers(code)].sort(),
+          [...(importMap as ImportMapModule).extractImportSpecifiers(code)].sort(),
+          [...(importMap as ImportMapModule).extractImportMetaResolveSpecifiers(code)].sort(),
+        ]),
     } satisfies Ui4aRuntime;
   })().catch((error) => {
     // Let a later mount retry rather than pinning the rejection for the page.
@@ -197,11 +209,30 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<RenderState>({ status: "loading" });
 
+  // Effects that feed a stream are recreated for every token. Keep lifecycle
+  // and callback state in refs so the callbacks installed on the one renderer
+  // instance do not close over the first effect's cancellation flag. In
+  // particular, the cleanup for the first token must not silence the callback
+  // that reports the final fence render.
+  const activeRef = useRef(false);
+  const latestClosedRef = useRef(closed);
+  const updateSerialRef = useRef(0);
+  const fatalErrorRef = useRef(false);
+  const finalErrorEligibleRef = useRef(false);
+  const finalRenderActiveRef = useRef(false);
+  const rendererGenerationRef = useRef(0);
+  const importMapRef = useRef<{
+    key: string;
+    promise: Promise<RendererImportMap>;
+  } | null>(null);
+
   // The renderer instance is created once and kept alive across `code`/`closed`
   // changes, so partial frames accumulate on ONE streaming buffer (pushCode
   // appends) and preserved state survives frame to frame. A per-`code` effect
   // would detach and recreate the renderer on every token, throwing away both.
   const rendererRef = useRef<Renderer | null>(null);
+  const creationPromiseRef = useRef<Promise<Renderer | null> | null>(null);
+  const frameQueueRef = useRef(Promise.resolve());
   // How much of `code` has already been fed to the renderer. pushCode takes
   // deltas (it appends), while react-markdown hands us the whole accumulated
   // body each frame, so we forward only the newly-arrived suffix.
@@ -210,8 +241,35 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
   // latest props so the creation tail can apply them once it is ready.
   const pendingRef = useRef<{ code: string; closed: boolean }>({ code, closed });
 
+  // Establish the renderer lifetime before the per-frame effects run. The
+  // cleanup intentionally only happens on unmount; frame effects cancel their
+  // own async work but never detach the shared renderer.
   useEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
+      updateSerialRef.current += 1;
+      rendererRef.current?.detach();
+      rendererRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const updateSerial = ++updateSerialRef.current;
     let cancelled = false;
+    pendingRef.current = { code, closed };
+    latestClosedRef.current = closed;
+
+    const resolveImportMap = (runtime: Ui4aRuntime, source: string) => {
+      const key = runtime.importMapKey(source);
+      if (importMapRef.current?.key === key) return importMapRef.current.promise;
+      const promise = runtime.buildImportMap(source);
+      importMapRef.current = { key, promise };
+      void promise.catch(() => {
+        if (importMapRef.current?.promise === promise) importMapRef.current = null;
+      });
+      return promise;
+    };
 
     // Feed one frame to a ready renderer: the new suffix as a partial frame while
     // the fence streams, or the full body via finish() once it closes. If the
@@ -219,10 +277,22 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
     // slipped past memo), reset the buffer and push the whole thing fresh.
     const applyFrame = (renderer: Renderer, nextCode: string, isClosed: boolean) => {
       if (isClosed) {
+        finalErrorEligibleRef.current = false;
+        finalRenderActiveRef.current = false;
         renderer.finish(nextCode);
         pushedLengthRef.current = nextCode.length;
+        // partial-react schedules the final compile in a microtask. Let that
+        // scheduler mark any older partial compile as superseded before a
+        // callback can be interpreted as a terminal final-frame error.
+        queueMicrotask(() => {
+          if (activeRef.current && rendererRef.current === renderer && latestClosedRef.current) {
+            finalErrorEligibleRef.current = true;
+          }
+        });
         return;
       }
+      finalErrorEligibleRef.current = false;
+      finalRenderActiveRef.current = false;
       const pushed = pushedLengthRef.current;
       if (nextCode.length === pushed) return;
       if (nextCode.startsWith(renderer.getCurrentBuffer())) {
@@ -234,53 +304,148 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
       pushedLengthRef.current = nextCode.length;
     };
 
-    pendingRef.current = { code, closed };
+    const enqueueFrame = (renderer: Renderer, runtime: Ui4aRuntime) => {
+      const frame = pendingRef.current;
+      const operation = frameQueueRef.current.then(async () => {
+        // Coalesce tokens while a remote import map or compile is in flight;
+        // only the newest source needs to be applied to the append-only buffer.
+        if (
+          !activeRef.current ||
+          updateSerial !== updateSerialRef.current ||
+          rendererRef.current !== renderer
+        )
+          return;
+        const importmap = await resolveImportMap(runtime, frame.code);
+        if (
+          !activeRef.current ||
+          updateSerial !== updateSerialRef.current ||
+          rendererRef.current !== renderer
+        )
+          return;
+        renderer.setImportMap(importmap);
+        applyFrame(renderer, frame.code, frame.closed);
+      });
+      frameQueueRef.current = operation.catch(() => {});
+      void operation.catch((error) => {
+        // Open-frame failures are expected and recover on the next token. A
+        // closed frame has no next token, so surface its source instead.
+        if (
+          activeRef.current &&
+          updateSerial === updateSerialRef.current &&
+          latestClosedRef.current
+        ) {
+          fatalErrorRef.current = true;
+          renderer.detach();
+          if (rendererRef.current === renderer) rendererRef.current = null;
+          setState({
+            status: "error",
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
+    };
 
-    if (rendererRef.current) {
-      applyFrame(rendererRef.current, code, closed);
-      return () => {
-        cancelled = true;
-      };
+    if (!closed && fatalErrorRef.current) {
+      // A caller may reuse the block for a new open stream after a failed
+      // closed frame. Allow a fresh renderer to be created for that stream.
+      fatalErrorRef.current = false;
+      setState({ status: "loading" });
     }
+
+    // Creation is shared by all token effects. A slow lazy import or compiler
+    // setup therefore cannot be cancelled and restarted on every new token.
+    // Start with host modules only; later map resolutions add npm imports as
+    // soon as they appear in the streamed source.
+    const ensureRenderer = async (): Promise<Renderer | null> => {
+      if (rendererRef.current) return rendererRef.current;
+      if (!creationPromiseRef.current) {
+        const creating = (async () => {
+          const runtime = await loadRuntime();
+          if (!activeRef.current) return null;
+          const importmap = await resolveImportMap(runtime, "");
+          const target = hostRef.current;
+          if (!activeRef.current || !target) return null;
+
+          const generation = ++rendererGenerationRef.current;
+          const renderer = await runtime.createRenderer(target, {
+            importmap,
+            preserveStateOnUpdate: true,
+            callbacks: {
+              onReady: (_component, _url, renderedCode) => {
+                if (
+                  activeRef.current &&
+                  finalErrorEligibleRef.current &&
+                  latestClosedRef.current &&
+                  renderedCode === pendingRef.current.code
+                ) {
+                  finalRenderActiveRef.current = true;
+                }
+              },
+              onRendered: () => {
+                if (activeRef.current && !fatalErrorRef.current) {
+                  setState({ status: "ready" });
+                }
+              },
+              onError: (error, phase) => {
+                // Open frames can be temporarily invalid. After a close, only
+                // an error from the final compile/render may replace the host.
+                // A prior partial render error can arrive during the handoff;
+                // onReady marks when the final component actually starts render.
+                if (
+                  !activeRef.current ||
+                  generation !== rendererGenerationRef.current ||
+                  !latestClosedRef.current ||
+                  !finalErrorEligibleRef.current ||
+                  (phase === "render" && !finalRenderActiveRef.current) ||
+                  fatalErrorRef.current
+                )
+                  return;
+                fatalErrorRef.current = true;
+                rendererRef.current?.detach();
+                rendererRef.current = null;
+                setState({ status: "error", message: error.message });
+              },
+            },
+          });
+          if (!activeRef.current) {
+            renderer.detach();
+            return null;
+          }
+          // A renderer created after a terminal compile error has an empty
+          // append buffer. Do not carry the previous instance's source length
+          // into the new stream; its first frame must be pushed in full.
+          pushedLengthRef.current = 0;
+          rendererRef.current = renderer;
+          return renderer;
+        })();
+        creationPromiseRef.current = creating;
+        void creating.finally(() => {
+          if (creationPromiseRef.current === creating) creationPromiseRef.current = null;
+        }).catch(() => {});
+      }
+      return creationPromiseRef.current;
+    };
 
     void (async () => {
       try {
+        const renderer = await ensureRenderer();
+        if (!renderer) return;
         const runtime = await loadRuntime();
         if (cancelled) return;
-        const target = hostRef.current;
-        if (!target) return;
-
-        // The import map is resolved from the current body; while streaming it may
-        // not yet name every dependency, but partial-react re-resolves misses
-        // against the esm.sh fallback, and the closed frame carries the full set.
-        const importmap = await runtime.buildImportMap(pendingRef.current.code);
-        if (cancelled) return;
-
-        const renderer = await runtime.createRenderer(target, {
-          importmap,
-          // Streaming needs preserved state: each partial frame keeps the last
-          // good render and mounted state, so a transiently unparseable frame
-          // never blanks the panel and the widget grows in place.
-          preserveStateOnUpdate: true,
-          callbacks: {
-            onRendered: () => {
-              if (!cancelled) setState({ status: "ready" });
-            },
-            onError: (error) => {
-              if (!cancelled) setState({ status: "error", message: error.message });
-            },
-          },
-        });
-        if (cancelled) {
-          renderer.detach();
-          return;
-        }
-        rendererRef.current = renderer;
-        // Apply whatever the latest frame is (props may have advanced during the
-        // async create), driving the buffer from empty.
-        applyFrame(renderer, pendingRef.current.code, pendingRef.current.closed);
+        enqueueFrame(renderer, runtime);
       } catch (error) {
-        if (!cancelled) {
+        // Import-map and partial compile failures can recover when more source
+        // arrives. A settled fence has no future tokens, so show its source.
+        if (
+          !cancelled &&
+          activeRef.current &&
+          updateSerial === updateSerialRef.current &&
+          latestClosedRef.current
+        ) {
+          fatalErrorRef.current = true;
+          rendererGenerationRef.current += 1;
+          rendererRef.current?.detach();
+          rendererRef.current = null;
           setState({
             status: "error",
             message: error instanceof Error ? error.message : String(error),
@@ -293,14 +458,6 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
       cancelled = true;
     };
   }, [code, closed]);
-
-  // Detach the renderer only when the block unmounts, not on every frame.
-  useEffect(() => {
-    return () => {
-      rendererRef.current?.detach();
-      rendererRef.current = null;
-    };
-  }, []);
 
   // On failure, fall back to the source as a normal highlighted code block, so a
   // broken component is never a blank space.

@@ -23,6 +23,7 @@ const {
   pushCodeSpy,
   finishSpy,
   clearSpy,
+  setImportMapSpy,
   detachSpy,
   resolveSpy,
   capturedOptions,
@@ -32,6 +33,7 @@ const {
   pushCodeSpy: vi.fn(),
   finishSpy: vi.fn(),
   clearSpy: vi.fn(),
+  setImportMapSpy: vi.fn(),
   detachSpy: vi.fn(),
   resolveSpy: vi.fn(),
   // The options object passed to GenUIRenderer.create, captured so a test can
@@ -44,7 +46,7 @@ const {
 // non-append) is exercised against a realistic buffer rather than a constant.
 function makeRenderer() {
   let buffer = "";
-  return {
+  const renderer = {
     render: (code: string) => {
       buffer = code;
       renderSpy(code);
@@ -62,8 +64,13 @@ function makeRenderer() {
       buffer = "";
       clearSpy(options);
     },
+    setImportMap: (importmap: unknown) => {
+      setImportMapSpy(importmap);
+      return renderer;
+    },
     detach: detachSpy,
   };
+  return renderer;
 }
 
 vi.mock("partial-react", () => ({
@@ -81,6 +88,11 @@ vi.mock("partial-react/import-map", () => ({
   // from [host singletons, esm.sh fallback] and resolves before rendering.
   createImportMapResolver: () => ({ resolve: resolveSpy }),
   literalImportMap: (map: unknown) => ({ kind: "literal", map }),
+  extractBareModuleSpecifiers: (code: string) =>
+    new Set([...code.matchAll(/from\s+["']([^"']+)["']/g)].map((match) => match[1])),
+  extractImportSpecifiers: (code: string) =>
+    new Set([...code.matchAll(/from\s+["']([^"']+)["']/g)].map((match) => match[1])),
+  extractImportMetaResolveSpecifiers: () => new Set(),
 }));
 
 vi.mock("partial-react/remote-module", () => ({
@@ -99,6 +111,7 @@ beforeEach(() => {
   pushCodeSpy.mockClear();
   finishSpy.mockClear();
   clearSpy.mockClear();
+  setImportMapSpy.mockClear();
   detachSpy.mockClear();
   resolveSpy.mockReset();
   resolveSpy.mockResolvedValue({ imports: {} });
@@ -142,8 +155,9 @@ describe("Ui4aFenceBlock", () => {
 
     await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
 
-    // Import map resolved from the source BEFORE the renderer is created.
-    expect(resolveSpy).toHaveBeenCalledWith({ code: CODE });
+    // The host bridge is resolved before creation. A source with no bare
+    // imports reuses that same map for its final compile.
+    expect(resolveSpy).toHaveBeenCalledWith({ code: "" });
     // Streaming keeps the last good frame and mounted state across frames.
     const options = capturedOptions.current as { preserveStateOnUpdate?: boolean };
     expect(options.preserveStateOnUpdate).toBe(true);
@@ -170,6 +184,43 @@ describe("Ui4aFenceBlock", () => {
     );
     // Still one renderer instance: the stream accumulated on a single buffer.
     expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates one renderer even when tokens arrive during lazy setup", async () => {
+    let releaseBaseMap: ((value: { imports: Record<string, string> }) => void) | undefined;
+    resolveSpy.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseBaseMap = resolve;
+        }),
+    );
+    const first = "export default function C() {";
+    const second = `${first}\nreturn <div>ready</div>;`;
+    const { rerender } = render(<Ui4aFenceBlock code={first} closed={false} />);
+    await waitFor(() => expect(releaseBaseMap).toBeDefined());
+
+    rerender(<Ui4aFenceBlock code={second} closed={false} />);
+    expect(createSpy).not.toHaveBeenCalled();
+
+    await act(async () => releaseBaseMap?.({ imports: {} }));
+    await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(pushCodeSpy).toHaveBeenCalledWith(second));
+  });
+
+  it("refreshes the import map as streamed imports arrive", async () => {
+    const FRAME_1 = "export default () => <div>hello</div>;";
+    const FRAME_2 = `${FRAME_1}\nimport * as echarts from "echarts";`;
+    const { rerender } = render(<Ui4aFenceBlock code={FRAME_1} closed={false} />);
+
+    await waitFor(() => expect(pushCodeSpy).toHaveBeenCalledWith(FRAME_1));
+    setImportMapSpy.mockClear();
+    resolveSpy.mockClear();
+
+    rerender(<Ui4aFenceBlock code={FRAME_2} closed={false} />);
+
+    await waitFor(() => expect(resolveSpy).toHaveBeenCalledWith({ code: FRAME_2 }));
+    expect(setImportMapSpy).toHaveBeenCalled();
+    expect(pushCodeSpy).toHaveBeenCalledWith(FRAME_2.slice(FRAME_1.length));
   });
 
   it("finishes the full body when a streamed-open fence finally closes", async () => {
@@ -211,9 +262,50 @@ describe("Ui4aFenceBlock", () => {
     });
   });
 
+  it("keeps the host mounted when an open partial frame reports an error", async () => {
+    const first = "export default () => <div>";
+    const second = `${first}ready</div>;`;
+    const { container, rerender } = render(
+      <Ui4aFenceBlock code={first} closed={false} />,
+    );
+    await waitFor(() => expect(createSpy).toHaveBeenCalled());
+
+    act(() => fireError("incomplete"));
+
+    await waitFor(() => {
+      expect(container.querySelector(".ui4a-block")).not.toBeNull();
+      expect(container.querySelector("code.hljs")).toBeNull();
+    });
+
+    rerender(<Ui4aFenceBlock code={second} closed={false} />);
+    await waitFor(() =>
+      expect(pushCodeSpy).toHaveBeenCalledWith(second.slice(first.length)),
+    );
+  });
+
+  it("accepts renderer callbacks after a later token replaces the creation effect", async () => {
+    const { container, rerender } = render(
+      <Ui4aFenceBlock code="export default () => <div>" closed={false} />,
+    );
+    await waitFor(() => expect(pushCodeSpy).toHaveBeenCalled());
+
+    rerender(
+      <Ui4aFenceBlock code="export default () => <div>ready</div>;" closed={false} />,
+    );
+    await waitFor(() => expect(pushCodeSpy).toHaveBeenCalledTimes(2));
+
+    act(() => fireRendered());
+
+    await waitFor(() =>
+      expect(container.querySelector(".ui4a-block")?.getAttribute("data-status")).toBe(
+        "ready",
+      ),
+    );
+  });
+
   it("falls back to static source when the component errors", async () => {
     const { container } = render(<Ui4aFenceBlock code={CODE} closed />);
-    await waitFor(() => expect(createSpy).toHaveBeenCalled());
+    await waitFor(() => expect(finishSpy).toHaveBeenCalledWith(CODE));
 
     act(() => fireError("boom"));
 
@@ -222,6 +314,22 @@ describe("Ui4aFenceBlock", () => {
       expect(container.querySelector("code.hljs")).not.toBeNull();
     });
     expect(container.querySelector(".ui4a-block")).toBeNull();
+  });
+
+  it("pushes the full first frame when a new stream follows a closed-frame error", async () => {
+    const INITIAL = "export default () => <div>broken</div>;";
+    const RECOVERY = "export default () => <div>recovered</div>;";
+    const { rerender } = render(<Ui4aFenceBlock code={INITIAL} closed />);
+    await waitFor(() => expect(finishSpy).toHaveBeenCalledWith(INITIAL));
+
+    // The final compile error tears down its renderer. A later stream gets a
+    // fresh empty renderer and must not reuse the old buffer length.
+    await act(async () => Promise.resolve());
+    act(() => fireError("final compile failed"));
+    rerender(<Ui4aFenceBlock code={RECOVERY} closed={false} />);
+
+    await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(pushCodeSpy).toHaveBeenCalledWith(RECOVERY));
   });
 
   it("detaches the renderer on unmount so its blob URLs are revoked", async () => {

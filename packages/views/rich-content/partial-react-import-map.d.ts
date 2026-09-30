@@ -30,6 +30,10 @@ export type ImportMapResolver = {
   resolve: (context?: { code?: string }) => Promise<RendererImportMap>;
 };
 
+export function extractBareModuleSpecifiers(code: string): Set<string>;
+export function extractImportSpecifiers(code: string): Set<string>;
+export function extractImportMetaResolveSpecifiers(code: string): Set<string>;
+
 export function literalImportMap(map: RendererImportMap): ImportMapProvider;
 export function createImportMapResolver(
   providers: ImportMapProvider[],
