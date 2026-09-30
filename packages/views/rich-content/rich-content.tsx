@@ -75,6 +75,7 @@ import {
   RichFenceBlock,
   StaticCodeBody,
   isRichFenceLanguage,
+  isStreamingCapableFence,
   shouldUpgradeFence,
 } from "./rich-code-block";
 import "katex/dist/katex.min.css";
@@ -352,7 +353,13 @@ function RichCode({ className, children, node, ...props }: RichCodeProps) {
     // isRichFenceLanguage is re-checked for the type narrow; shouldUpgradeFence
     // already required it.
     if (isRichFenceLanguage(language)) {
-      return <RichFenceBlock language={language} body={String(children).replace(/\n$/, "")} />;
+      return (
+        <RichFenceBlock
+          language={language}
+          body={String(children).replace(/\n$/, "")}
+          isFenceClosed={isFenceClosed}
+        />
+      );
     }
   }
 
@@ -405,8 +412,11 @@ function RichPre({ children }: RichPreProps) {
   // A rich-fence language whose fence has not closed yet is the streaming
   // SOURCE of a block that will upgrade (its full body can be hundreds of
   // lines), so the shell caps and scrolls it rather than letting it push the
-  // whole message down while it types out.
-  const streamingSource = isRichFenceLanguage(language) && !isFenceClosed;
+  // whole message down while it types out. A streaming-capable language
+  // (`ui4a/tsx`) is excluded: it already escaped this envelope above and renders
+  // its widget while open, so it never shows capped source.
+  const streamingSource =
+    isRichFenceLanguage(language) && !isFenceClosed && !isStreamingCapableFence(language);
 
   return (
     <CodeBlockShell

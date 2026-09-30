@@ -9,9 +9,14 @@
  * module, and mounts it — so a chat message, an issue description, a comment,
  * or an agent trajectory round can carry a live GenUI widget.
  *
- * Reached ONLY from rich-code-block.tsx's RichFenceBlock, and only for a CLOSED
- * fence (see streaming-fence.ts) — a half-streamed fence renders as plain
- * source, so the compiler never parses a partial component.
+ * Reached from rich-code-block.tsx's RichFenceBlock for BOTH an open and a
+ * closed fence. UI4A's selling point is partial rendering: while the fence
+ * streams, each frame is fed to partial-react's `pushCode`, which compiles the
+ * partial body through partial-tsx's streaming completer so the widget grows
+ * token by token (skeleton → card → chart). When the fence closes, `finish`
+ * runs the final full compile. `preserveStateOnUpdate` keeps mounted state and
+ * the last good frame across partial frames, so a transiently unparseable frame
+ * never blanks the panel.
  *
  * Everything heavy is lazy. The partial-react/partial-tsx libraries and the
  * host React namespaces are pulled through dynamic import() inside an effect
@@ -186,16 +191,57 @@ type RenderState =
   | { status: "ready" }
   | { status: "error"; message: string };
 
-function Ui4aRenderer({ code }: { code: string }) {
+type Renderer = Awaited<ReturnType<Ui4aRuntime["createRenderer"]>>;
+
+function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<RenderState>({ status: "loading" });
 
+  // The renderer instance is created once and kept alive across `code`/`closed`
+  // changes, so partial frames accumulate on ONE streaming buffer (pushCode
+  // appends) and preserved state survives frame to frame. A per-`code` effect
+  // would detach and recreate the renderer on every token, throwing away both.
+  const rendererRef = useRef<Renderer | null>(null);
+  // How much of `code` has already been fed to the renderer. pushCode takes
+  // deltas (it appends), while react-markdown hands us the whole accumulated
+  // body each frame, so we forward only the newly-arrived suffix.
+  const pushedLengthRef = useRef(0);
+  // A frame can arrive before the async renderer finishes creating; remember the
+  // latest props so the creation tail can apply them once it is ready.
+  const pendingRef = useRef<{ code: string; closed: boolean }>({ code, closed });
+
   useEffect(() => {
     let cancelled = false;
-    // The renderer owns its own React root inside `target`; keep a handle so the
-    // cleanup can detach it (unmount + revoke the blob module URLs).
-    type Renderer = Awaited<ReturnType<Ui4aRuntime["createRenderer"]>>;
-    let renderer: Renderer | null = null;
+
+    // Feed one frame to a ready renderer: the new suffix as a partial frame while
+    // the fence streams, or the full body via finish() once it closes. If the
+    // body is not an append of what we already pushed (an edit or a re-key that
+    // slipped past memo), reset the buffer and push the whole thing fresh.
+    const applyFrame = (renderer: Renderer, nextCode: string, isClosed: boolean) => {
+      if (isClosed) {
+        renderer.finish(nextCode);
+        pushedLengthRef.current = nextCode.length;
+        return;
+      }
+      const pushed = pushedLengthRef.current;
+      if (nextCode.length === pushed) return;
+      if (nextCode.startsWith(renderer.getCurrentBuffer())) {
+        renderer.pushCode(nextCode.slice(pushed));
+      } else {
+        renderer.clear({ preserveVisualState: true });
+        renderer.pushCode(nextCode);
+      }
+      pushedLengthRef.current = nextCode.length;
+    };
+
+    pendingRef.current = { code, closed };
+
+    if (rendererRef.current) {
+      applyFrame(rendererRef.current, code, closed);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     void (async () => {
       try {
@@ -204,14 +250,18 @@ function Ui4aRenderer({ code }: { code: string }) {
         const target = hostRef.current;
         if (!target) return;
 
-        const importmap = await runtime.buildImportMap(code);
+        // The import map is resolved from the current body; while streaming it may
+        // not yet name every dependency, but partial-react re-resolves misses
+        // against the esm.sh fallback, and the closed frame carries the full set.
+        const importmap = await runtime.buildImportMap(pendingRef.current.code);
         if (cancelled) return;
 
-        renderer = await runtime.createRenderer(target, {
+        const renderer = await runtime.createRenderer(target, {
           importmap,
-          // A closed fence is a complete component: no state to preserve across
-          // stream frames, and a single render() is the whole lifecycle.
-          preserveStateOnUpdate: false,
+          // Streaming needs preserved state: each partial frame keeps the last
+          // good render and mounted state, so a transiently unparseable frame
+          // never blanks the panel and the widget grows in place.
+          preserveStateOnUpdate: true,
           callbacks: {
             onRendered: () => {
               if (!cancelled) setState({ status: "ready" });
@@ -223,10 +273,12 @@ function Ui4aRenderer({ code }: { code: string }) {
         });
         if (cancelled) {
           renderer.detach();
-          renderer = null;
           return;
         }
-        renderer.render(code);
+        rendererRef.current = renderer;
+        // Apply whatever the latest frame is (props may have advanced during the
+        // async create), driving the buffer from empty.
+        applyFrame(renderer, pendingRef.current.code, pendingRef.current.closed);
       } catch (error) {
         if (!cancelled) {
           setState({
@@ -239,9 +291,16 @@ function Ui4aRenderer({ code }: { code: string }) {
 
     return () => {
       cancelled = true;
-      renderer?.detach();
     };
-  }, [code]);
+  }, [code, closed]);
+
+  // Detach the renderer only when the block unmounts, not on every frame.
+  useEffect(() => {
+    return () => {
+      rendererRef.current?.detach();
+      rendererRef.current = null;
+    };
+  }, []);
 
   // On failure, fall back to the source as a normal highlighted code block, so a
   // broken component is never a blank space.
@@ -256,21 +315,32 @@ function Ui4aRenderer({ code }: { code: string }) {
   }
 
   // The renderer mounts its own subtree into this host node. It stays empty
-  // until the effect commits the compiled component.
+  // until the first frame commits the compiled component.
   return <div ref={hostRef} className="ui4a-block my-3" data-status={state.status} />;
 }
 
 const MemoUi4aRenderer = memo(Ui4aRenderer);
 
 /**
- * The rich leaf for a closed ```ui4a/tsx fence. Wrapped in the near-viewport
- * lazy shell like the other rich leaves, so the browser-side compile only runs
- * once the block is scrolled near.
+ * The rich leaf for a ```ui4a/tsx fence, open or closed. Wrapped in the
+ * near-viewport lazy shell like the other rich leaves, so the browser-side
+ * compile only runs once the block is scrolled near.
+ *
+ * While the fence streams (`closed` is false) the body grows every token. The
+ * lazy shell's `sourceKey` is the mount-once registry identity, so it must stay
+ * stable across those frames — keying it on the growing body would spam the
+ * registry and never latch. The CLOSED body is the block's stable identity, so
+ * only a closed fence contributes a key; an open fence relies on React keeping
+ * this leaf at a stable tree position (the parent memoizes the markdown subtree,
+ * so a new frame reconciles rather than remounts) to preserve the live renderer.
  */
-export function Ui4aFenceBlock({ code }: { code: string }) {
+export function Ui4aFenceBlock({ code, closed }: { code: string; closed: boolean }) {
   return (
-    <LazyRichBlock reservedHeightPx={UI4A_BLOCK_HEIGHT_PX} sourceKey={code}>
-      <MemoUi4aRenderer code={code} />
+    <LazyRichBlock
+      reservedHeightPx={UI4A_BLOCK_HEIGHT_PX}
+      sourceKey={closed ? code : undefined}
+    >
+      <MemoUi4aRenderer code={code} closed={closed} />
     </LazyRichBlock>
   );
 }

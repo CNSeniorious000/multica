@@ -57,14 +57,35 @@ export function isRichFenceLanguage(
 }
 
 /**
+ * Languages whose leaf can render an OPEN (still-streaming) fence. `ui4a/tsx`
+ * compiles each partial frame through partial-tsx's streaming completer, so the
+ * widget grows token by token as the fence types out (skeleton → card → chart).
+ *
+ * Mermaid and HTML are NOT streaming-capable: a half-written diagram throws on
+ * every keystroke and a half-written iframe would be recreated dozens of times a
+ * second, so they stay source-only until their fence closes (see
+ * streaming-fence.ts). This split is the whole reason the gate is per-language
+ * rather than a single closed-fence flag.
+ */
+export function isStreamingCapableFence(
+  language: string | undefined,
+): language is RichFenceLanguage {
+  return language === "ui4a/tsx";
+}
+
+/**
  * Whether a fenced block should render as a rich block rather than source.
- * Both conditions are required: a rich-capable language AND a closed fence.
+ *
+ * A streaming-capable language (`ui4a/tsx`) upgrades as soon as it is a rich
+ * language, open or closed — its leaf drives partial-frame compilation while the
+ * fence streams. Every other rich language additionally requires a closed fence.
  */
 export function shouldUpgradeFence(
   language: string | undefined,
   isFenceClosed: boolean,
 ): boolean {
-  return isRichFenceLanguage(language) && isFenceClosed;
+  if (!isRichFenceLanguage(language)) return false;
+  return isFenceClosed || isStreamingCapableFence(language);
 }
 
 // Memoized on source so appending text elsewhere in a streaming message does
@@ -203,14 +224,21 @@ export function CodeBlockShell({
 export function RichFenceBlock({
   language,
   body,
+  isFenceClosed,
 }: {
   language: RichFenceLanguage;
   body: string;
+  /**
+   * Whether the source fence has closed. Only `ui4a/tsx` is reached while this
+   * is false (it streams partial frames); mermaid/html are always closed here
+   * because shouldUpgradeFence gates them on closedness.
+   */
+  isFenceClosed: boolean;
 }) {
   // Split into separate components so the Mermaid-only height hook is never
   // called conditionally.
   if (language === "mermaid") return <MermaidFenceBlock chart={body} />;
-  if (language === "ui4a/tsx") return <Ui4aFenceBlock code={body} />;
+  if (language === "ui4a/tsx") return <Ui4aFenceBlock code={body} closed={isFenceClosed} />;
   return <HtmlFenceBlock html={body} />;
 }
 

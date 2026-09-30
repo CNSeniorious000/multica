@@ -19,6 +19,8 @@ export type GenUIRendererCallbacks = {
 
 export type GenUIRendererFlushMode = "microtask" | "immediate";
 
+export type GenUIRendererClearOptions = { preserveVisualState?: boolean };
+
 export type GenUIRendererOptions = {
   importmap?: RendererImportMap;
   callbacks?: GenUIRendererCallbacks;
@@ -34,5 +36,9 @@ export class GenUIRenderer {
     options?: GenUIRendererOptions,
   ): Promise<GenUIRenderer>;
   render(code: string, serial?: number): void;
+  pushCode(code: string, serial?: number): void;
+  finish(code?: string, serial?: number): void;
+  getCurrentBuffer(): string;
+  clear(options?: GenUIRendererClearOptions): this;
   detach(): this;
 }

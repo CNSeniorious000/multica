@@ -91,8 +91,10 @@ vi.mock("mermaid", () => ({
 // we only assert that a ```ui4a/tsx fence is DISPATCHED to it on every surface,
 // so a lightweight stand-in that marks itself is enough.
 vi.mock("./ui4a-block", () => ({
-  Ui4aFenceBlock: ({ code }: { code: string }) => (
-    <div data-testid="ui4a-block">{code}</div>
+  Ui4aFenceBlock: ({ code, closed }: { code: string; closed: boolean }) => (
+    <div data-testid="ui4a-block" data-closed={closed ? "" : undefined}>
+      {code}
+    </div>
   ),
 }));
 
@@ -542,26 +544,34 @@ describe("ui4a/tsx dispatch (MAC-19026)", () => {
     expect(container.querySelector("code.hljs")).toBeNull();
   });
 
-  it("shows an OPEN ui4a/tsx fence as highlighted TSX source in a capped shell", async () => {
-    // Closing fence not yet streamed: the block must stay source (no upgrade),
-    // and while it streams it should read as TSX — not the plaintext an
-    // unregistered `ui4a/tsx` grammar would fall back to — inside the capped,
-    // scrollable streaming-source shell.
+  it("upgrades an OPEN ui4a/tsx fence to the streaming leaf, not capped source", async () => {
+    // ui4a/tsx is streaming-capable: the leaf drives partial-frame compilation
+    // while the fence is still open, so it upgrades as soon as the language is
+    // known (unlike mermaid/html, which stay source until their fence closes).
+    // The leaf is told the fence is still open via `closed={false}` so it feeds
+    // partial frames rather than a final full compile.
     const OPEN = "```ui4a/tsx\nexport default () => <div>hi</div>;\n";
     const { container } = render(<ReadonlyContent content={OPEN} />);
     await waitFor(() => {
-      expect(container.querySelector("code")).not.toBeNull();
+      expect(container.querySelector("[data-testid='ui4a-block']")).not.toBeNull();
     });
-    // Not upgraded: no ui4a leaf while the fence is open.
-    expect(container.querySelector("[data-testid='ui4a-block']")).toBeNull();
-    // Highlighted as TSX (lowlight maps the token to `tsx`), not plaintext:
-    // the `export` keyword becomes its own hljs span.
-    const code = container.querySelector("code.hljs.language-tsx");
-    expect(code).not.toBeNull();
-    expect(container.querySelector(".hljs-keyword")).not.toBeNull();
-    // Streaming-source shell carries the cap marker.
+    // Upgraded while open: the leaf receives closed=false.
+    const leaf = container.querySelector("[data-testid='ui4a-block']");
+    expect(leaf?.getAttribute("data-closed")).toBeNull();
+    // No capped source shell: the widget renders in place, it is not shown as
+    // scrollable TSX source.
+    expect(container.querySelector("code.hljs")).toBeNull();
     expect(
       container.querySelector(".code-block-wrapper[data-streaming-source]"),
-    ).not.toBeNull();
+    ).toBeNull();
+  });
+
+  it("tells the leaf the fence has closed once its closer streams in", async () => {
+    const { container } = render(<ReadonlyContent content={UI4A_FIXTURE} />);
+    await waitFor(() => {
+      expect(container.querySelector("[data-testid='ui4a-block']")).not.toBeNull();
+    });
+    const leaf = container.querySelector("[data-testid='ui4a-block']");
+    expect(leaf?.getAttribute("data-closed")).toBe("");
   });
 });

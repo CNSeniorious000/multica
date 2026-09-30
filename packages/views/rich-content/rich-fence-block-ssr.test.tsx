@@ -84,7 +84,11 @@ function serverRender(ui: Parameters<typeof renderToString>[0]): string {
   }
 }
 
-const block = () => <RichFenceBlock language="mermaid" body={CHART} />;
+// Mermaid only upgrades on a closed fence, so this SSR height suite always
+// drives the closed path.
+const block = () => (
+  <RichFenceBlock language="mermaid" body={CHART} isFenceClosed />
+);
 
 describe("RichFenceBlock reserved height", () => {
   it("reserves the skeleton height on the server, not the cached height", () => {
