@@ -186,6 +186,19 @@ describe("LazyRichBlock", () => {
     // the SSR suite below.
     expect(screen.getByTestId("expensive")).toBeInTheDocument();
   });
+
+  it("mounts an active stream eagerly without waiting for intersection", () => {
+    render(
+      <LazyRichBlock reservedHeightPx={280} eager>
+        <Expensive />
+      </LazyRichBlock>,
+    );
+
+    // The eager path still mounts from an effect, preserving the SSR-safe
+    // placeholder frame while making an open streamed fence observable.
+    expect(screen.getByTestId("expensive")).toBeInTheDocument();
+    expect(observers).toHaveLength(0);
+  });
 });
 
 /**

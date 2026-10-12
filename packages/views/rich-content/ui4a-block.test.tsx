@@ -204,7 +204,9 @@ describe("Ui4aFenceBlock", () => {
 
     await act(async () => releaseBaseMap?.({ imports: {} }));
     await waitFor(() => expect(createSpy).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(pushCodeSpy).toHaveBeenCalledWith(second));
+    await waitFor(() => expect(pushCodeSpy).toHaveBeenCalledTimes(2));
+    expect(pushCodeSpy).toHaveBeenNthCalledWith(1, first);
+    expect(pushCodeSpy).toHaveBeenNthCalledWith(2, second.slice(first.length));
   });
 
   it("refreshes the import map as streamed imports arrive", async () => {

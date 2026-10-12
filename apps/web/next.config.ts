@@ -1,5 +1,6 @@
 import type { NextConfig } from "next";
 import { config } from "dotenv";
+import { createRequire } from "node:module";
 import { resolve } from "path";
 import {
   resolveDevDocsUrl,
@@ -8,6 +9,19 @@ import {
   resolveRemoteApiUrl,
 } from "./config/runtime-urls";
 import { createMDX } from "fumadocs-mdx/next";
+
+// Next loads its own webpack bundle when evaluating this config. Keep the
+// small runtime surface we use here structural so the app does not need a
+// direct webpack dependency (or a transitive webpack type package) just to
+// type-check next.config.ts.
+type WebpackRuntime = {
+  NormalModuleReplacementPlugin: new (
+    resourceRegExp: RegExp,
+    newResource: (resource: { context?: string; request: string }) => void,
+  ) => unknown;
+};
+
+const requireWebpack = createRequire(__filename);
 
 // Load root .env so local next.config.ts rewrites see REMOTE_API_URL / DOCS_URL.
 // Production requests use proxy.ts runtime rewrites, which read process.env
@@ -58,7 +72,7 @@ const nextConfig: NextConfig = {
   // compile with `UnhandledSchemeError`.
   webpack(config, { isServer }) {
     config.plugins.push(
-      new (require("webpack") as typeof import("webpack")).NormalModuleReplacementPlugin(
+      new (requireWebpack("webpack") as WebpackRuntime).NormalModuleReplacementPlugin(
         /^node:/,
         (resource) => {
           // Keep Node builtins available to the rest of the app. Only

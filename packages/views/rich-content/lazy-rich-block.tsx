@@ -65,6 +65,7 @@ function supportsIntersectionObserver(): boolean {
 export function LazyRichBlock({
   reservedHeightPx,
   sourceKey,
+  eager = false,
   children,
 }: {
   /** Expected height of the mounted block; reserved before and after mount. */
@@ -75,6 +76,13 @@ export function LazyRichBlock({
    * re-created does not pay the mount cost again.
    */
   sourceKey?: string;
+  /**
+   * Mount immediately after the first client commit. Streaming rich blocks
+   * use this while their source is still open: the source row is already the
+   * visible live answer, so waiting for an intersection callback can defer
+   * the partial renderer until the fence has closed.
+   */
+  eager?: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -106,6 +114,14 @@ export function LazyRichBlock({
   useEffect(() => {
     if (mounted) return;
 
+    // An active stream must be mounted as soon as its row commits. The
+    // intersection gate is still appropriate for settled rich blocks, but it
+    // can miss the short open-fence window in a virtualized chat row.
+    if (eager) {
+      setMounted(true);
+      return;
+    }
+
     // No IntersectionObserver (jsdom, older webviews): fall back to mounting
     // eagerly. This runs in an effect rather than in the initial state so the
     // first committed frame still matches the server's.
@@ -135,7 +151,7 @@ export function LazyRichBlock({
     );
     observer.observe(el);
     return () => observer.disconnect();
-  }, [mounted, scrollRoot]);
+  }, [eager, mounted, scrollRoot]);
 
   // Record the mount so a recycled row can skip straight to the built block.
   useEffect(() => {

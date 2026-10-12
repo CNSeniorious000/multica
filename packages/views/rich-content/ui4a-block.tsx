@@ -211,9 +211,10 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
 
   // Effects that feed a stream are recreated for every token. Keep lifecycle
   // and callback state in refs so the callbacks installed on the one renderer
-  // instance do not close over the first effect's cancellation flag. In
-  // particular, the cleanup for the first token must not silence the callback
-  // that reports the final fence render.
+  // instance do not close over the first effect's cancellation flag. Open
+  // frames are queued even after their effect is cleaned up: otherwise a slow
+  // lazy renderer would drop every staged frame except the last one and the
+  // promised partial UI growth would never be visible.
   const activeRef = useRef(false);
   const latestClosedRef = useRef(closed);
   const updateSerialRef = useRef(0);
@@ -238,7 +239,8 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
   // body each frame, so we forward only the newly-arrived suffix.
   const pushedLengthRef = useRef(0);
   // A frame can arrive before the async renderer finishes creating; remember the
-  // latest props so the creation tail can apply them once it is ready.
+  // latest props so callbacks can compare final-render output once it is ready.
+  // Each effect also snapshots its own frame before queueing it.
   const pendingRef = useRef<{ code: string; closed: boolean }>({ code, closed });
 
   // Establish the renderer lifetime before the per-frame effects run. The
@@ -304,22 +306,28 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
       pushedLengthRef.current = nextCode.length;
     };
 
-    const enqueueFrame = (renderer: Renderer, runtime: Ui4aRuntime) => {
-      const frame = pendingRef.current;
+    const enqueueFrame = (
+      renderer: Renderer,
+      runtime: Ui4aRuntime,
+      frame: { code: string; closed: boolean },
+      serial: number,
+    ) => {
       const operation = frameQueueRef.current.then(async () => {
-        // Coalesce tokens while a remote import map or compile is in flight;
-        // only the newest source needs to be applied to the append-only buffer.
+        // Preserve the order of open frames so partial-tsx can expose the
+        // staged skeleton/card/chart states. Only a stale closed frame may be
+        // discarded; dropping an open frame defeats streaming when renderer
+        // setup takes longer than the model's first few increments.
         if (
           !activeRef.current ||
-          updateSerial !== updateSerialRef.current ||
-          rendererRef.current !== renderer
+          rendererRef.current !== renderer ||
+          (frame.closed && serial !== updateSerialRef.current)
         )
           return;
         const importmap = await resolveImportMap(runtime, frame.code);
         if (
           !activeRef.current ||
-          updateSerial !== updateSerialRef.current ||
-          rendererRef.current !== renderer
+          rendererRef.current !== renderer ||
+          (frame.closed && serial !== updateSerialRef.current)
         )
           return;
         renderer.setImportMap(importmap);
@@ -331,7 +339,8 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
         // closed frame has no next token, so surface its source instead.
         if (
           activeRef.current &&
-          updateSerial === updateSerialRef.current &&
+          frame.closed &&
+          serial === updateSerialRef.current &&
           latestClosedRef.current
         ) {
           fatalErrorRef.current = true;
@@ -431,14 +440,18 @@ function Ui4aRenderer({ code, closed }: { code: string; closed: boolean }) {
         const renderer = await ensureRenderer();
         if (!renderer) return;
         const runtime = await loadRuntime();
-        if (cancelled) return;
-        enqueueFrame(renderer, runtime);
+        // Cleanup cancels only a stale closed-frame effect. Open frames must
+        // still reach the shared queue so no legal streaming checkpoint is
+        // lost while the renderer is loading.
+        if (cancelled && closed) return;
+        enqueueFrame(renderer, runtime, { code, closed }, updateSerial);
       } catch (error) {
         // Import-map and partial compile failures can recover when more source
         // arrives. A settled fence has no future tokens, so show its source.
         if (
-          !cancelled &&
+          (!cancelled || !closed) &&
           activeRef.current &&
+          closed &&
           updateSerial === updateSerialRef.current &&
           latestClosedRef.current
         ) {
@@ -496,6 +509,7 @@ export function Ui4aFenceBlock({ code, closed }: { code: string; closed: boolean
     <LazyRichBlock
       reservedHeightPx={UI4A_BLOCK_HEIGHT_PX}
       sourceKey={closed ? code : undefined}
+      eager={!closed}
     >
       <MemoUi4aRenderer code={code} closed={closed} />
     </LazyRichBlock>
